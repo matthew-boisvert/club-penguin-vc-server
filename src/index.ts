@@ -7,7 +7,7 @@ import socketIO from 'socket.io';
 import Tracer from 'tracer';
 import morgan from 'morgan';
 
-const supportedCrewLinkVersions = new Set(['2.0.0', '2.0.1']);
+const supportedVersions = new Set(['1.0.0']);
 const httpsEnabled = !!process.env.HTTPS;
 
 const port = process.env.PORT || (httpsEnabled ? '443' : '9736');
@@ -33,7 +33,6 @@ const io = socketIO(server);
 const clients = new Map<string, Client>();
 
 interface Client {
-	playerId: number;
 	clientId: number;
 }
 
@@ -65,17 +64,21 @@ app.get('/health', (req, res) => {
 	});
 })
 
+function getRoomId(hostName: string, server: string, room: string) {
+	return hostName + "-" + server + "-" + room;
+}
+
 io.use((socket, next) => {
 	const userAgent = socket.request.headers['user-agent'];
-	const matches = /^CrewLink\/(\d+\.\d+\.\d+) \((\w+)\)$/.exec(userAgent);
+	const matches = /^PenguinChat\/(\d+\.\d+\.\d+) \((\w+)\)$/.exec(userAgent);
 	const error = new Error() as any;
-	error.data = { message: 'The voice server does not support your version of CrewLink.\nSupported versions: ' + Array.from(supportedCrewLinkVersions).join() };
+	error.data = { message: 'The voice server does not support your version of PenguinChat.\nSupported versions: ' + Array.from(supportedVersions).join() };
 	if (!matches) {
 		next(error);
 	} else {
 		const version = matches[1];
 		// const platform = matches[2];
-		if (supportedCrewLinkVersions.has(version)) {
+		if (supportedVersions.has(version)) {
 			next();
 		} else {
 			next(error);
@@ -86,20 +89,21 @@ io.use((socket, next) => {
 io.on('connection', (socket: socketIO.Socket) => {
 	connectionCount++;
 	logger.info("Total connected: %d", connectionCount);
-	let code: string | null = null;
+	let roomId: string | null = null;
 
-	socket.on('join', (c: string, id: number, clientId: number) => {
-		if (typeof c !== 'string' || typeof id !== 'number' || typeof clientId !== 'number') {
+	socket.on('join', (hostName: string, server: string, room: string, id: number) => {
+		if (typeof hostName !== 'string' || typeof server !== 'string' || typeof room !== 'string' || typeof id !== 'number') {
 			socket.disconnect();
-			logger.error(`Socket %s sent invalid join command: %s %d %d`, socket.id, c, id, clientId);
+			logger.error(`Socket %s sent invalid join command: %s %d %d`, socket.id, hostName, server, room, id);
 			return;
 		}
 
 		let otherClients: any = {};
-		if (io.sockets.adapter.rooms[c]) {
-			let socketsInLobby = Object.keys(io.sockets.adapter.rooms[c].sockets);
-			for (let s of socketsInLobby) {
-				if (clients.has(s) && clients.get(s).clientId === clientId) {
+		roomId = getRoomId(hostName, server, room);
+		if (io.sockets.adapter.rooms[roomId]) {
+			let socketsInRoom = Object.keys(io.sockets.adapter.rooms[roomId].sockets);
+			for (let s of socketsInRoom) {
+				if (clients.has(s) && clients.get(s).clientId === id) {
 					socket.disconnect();
 					logger.error(`Socket %s sent invalid join command, attempted spoofing another client`);
 					return;
@@ -108,19 +112,17 @@ io.on('connection', (socket: socketIO.Socket) => {
 					otherClients[s] = clients.get(s);
 			}
 		}
-		code = c;
-		socket.join(code);
-		socket.to(code).broadcast.emit('join', socket.id, {
-			playerId: id,
-			clientId: clientId === Math.pow(2, 32) - 1 ? null : clientId
+		socket.join(roomId);
+		socket.to(roomId).broadcast.emit('join', socket.id, {
+			clientId: id
 		});
 		socket.emit('setClients', otherClients);
 	});
 
-	socket.on('id', (id: number, clientId: number) => {
-		if (typeof id !== 'number' || typeof clientId !== 'number') {
+	socket.on('id', (clientId: number) => {
+		if (typeof clientId !== 'number') {
 			socket.disconnect();
-			logger.error(`Socket %s sent invalid id command: %d %d`, socket.id, id, clientId);
+			logger.error(`Socket %s sent invalid id command: %d %d`, socket.id, clientId);
 			return;
 		}
 		let client = clients.get(socket.id);
@@ -130,17 +132,16 @@ io.on('connection', (socket: socketIO.Socket) => {
 			return;
 		}
 		client = {
-			playerId: id,
-			clientId: clientId === Math.pow(2, 32) - 1 ? null : clientId
+			clientId: clientId
 		};
 		clients.set(socket.id, client);
-		socket.to(code).broadcast.emit('setClient', socket.id, client);
+		socket.to(roomId).broadcast.emit('setClient', socket.id, client);
 	})
 
 
 	socket.on('leave', () => {
-		if (code) {
-			socket.leave(code);
+		if (roomId) {
+			socket.leave(roomId);
 			clients.delete(socket.id);
 		}
 	})
@@ -168,5 +169,5 @@ io.on('connection', (socket: socketIO.Socket) => {
 
 server.listen(port);
 (async () => {
-	logger.info('CrewLink Server started: %s', address);
+	logger.info('PenguinChat Server started: %s', address);
 })();
